@@ -65,17 +65,32 @@ export function createKyjuReact<
   type Root = TRoot;
 
   /**
-   * Extract the first top-level root key from a selector function's source
-   * text, e.g. `root => root.app.todos` → `"app"`. Falls back to `undefined`
-   * when the source can't be parsed, which triggers a full (non-keyed)
-   * subscription.
+   * Extract all top-level keys accessed on the selector's first parameter,
+   * e.g. `(root) => root.app.todos` → `["app"]`,
+   *      `(s) => s.app.x + s.settings.y` → `["app", "settings"]`.
+   *
+   * Falls back to `[]` (triggers a full, non-keyed subscription) when the
+   * source can't be parsed or no keys can be extracted. Supports any
+   * parameter name (root, r, state, s, etc.).
    */
-  const extractTopLevelKey = (selector: Function): string | undefined => {
+  const extractTopLevelKeys = (selector: Function): string[] => {
     try {
-      const m = selector.toString().match(/\broot\.(\w+)/);
-      return m?.[1];
+      const src = selector.toString();
+      // Extract the first parameter name from arrow or regular functions.
+      // Matches: `(root) =>`, `root =>`, `function(root)`, `function foo(root)`
+      const paramMatch = src.match(/^(?:function\s*\w*\s*)?\(?\s*(\w+)/);
+      const param = paramMatch?.[1];
+      if (!param || param === "function") return [];
+      // Find all `param.something` accesses, deduplicated.
+      const keys: string[] = [];
+      const re = new RegExp(`\\b${param}\\.(\\w+)`, "g");
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(src)) !== null) {
+        if (!keys.includes(m[1]!)) keys.push(m[1]!);
+      }
+      return keys;
     } catch {
-      return undefined;
+      return [];
     }
   };
 
@@ -96,17 +111,25 @@ export function createKyjuReact<
 
     const cacheRef = useRef<{ output: T } | null>(null);
 
+    // Compute keys eagerly each render so the dependency array below reflects
+    // the current selector. If the selector's watched keys change between
+    // renders, `subscribe` gets a new reference and useSyncExternalStore
+    // re-subscribes with the correct keyed filter.
+    const subscribedKeys = selector ? extractTopLevelKeys(selector) : [];
+    // Stable string key for the dependency array (order-preserving, deduped).
+    const subscribedKeysKey = subscribedKeys.join(",");
+
     const subscribe = useCallback(
       (cb: () => void) => {
         const sel = selectorRef.current;
         if (sel) {
-          const key = extractTopLevelKey(sel);
-          const keys = key ? [key] : [];
-          return replica.subscribeKeyed(keys, () => cb());
+          // keys.length === 0 means we couldn't parse the selector → full subscription
+          return replica.subscribeKeyed(subscribedKeys, () => cb());
         }
         return replica.subscribe(() => cb());
       },
-      [replica],
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      [replica, subscribedKeysKey],
     );
 
     const getSnapshot = useCallback((): T | Root | undefined => {

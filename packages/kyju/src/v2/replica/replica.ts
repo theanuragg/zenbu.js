@@ -654,6 +654,9 @@ export const createReplica = (args: CreateReplicaArgs) => {
           const changedKeys = state.changedKeys;
           for (const ks of Array.from(keyedListeners)) {
             if (
+              // Empty changedKeys means a connect/reconnect: the entire root
+              // arrived fresh, so every keyed listener must be notified.
+              changedKeys.length === 0 ||
               ks.keys.length === 0 ||
               ks.keys.some((k) => changedKeys.includes(k))
             ) {

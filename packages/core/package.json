@@ -103,9 +103,9 @@
     "package.json"
   ],
   "scripts": {
-    "build": "node --max-old-space-size=8192 ./node_modules/tsdown/dist/run.mjs",
+    "build": "node init && node --max-old-space-size=8192 ./node_modules/tsdown/dist/run.mjs",
     "prebuild": "pnpm link:types",
-    "dev": "tsdown --watch",
+    "dev": "node init && tsdown --watch",
     "link:types": "tsx ./src/cli/bin.ts link --types-config ./zenbu-types.config.json --out ./src/registry-generated.ts --augment-out ./types/zenbu-register.ts",
     "db:generate": "node ./dist/cli/bin.mjs db generate --schema src/schema.ts --migrations ./migrations",
     "test": "vitest run",
