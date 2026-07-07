@@ -82,7 +82,7 @@ const handleWriteImpl = (ctx: DbHandlerContext, event: WriteEvent) =>
                   catch: (e) =>
                     e instanceof Error ? e : new Error(String(e)),
                 });
-                yield* ctx.rootCache.set(updated, [typedOp.path[0]]);
+                yield* ctx.rootCache.set(updated, typedOp.path.length === 0 ? undefined : [typedOp.path[0]]);
               }),
             ),
           ),
@@ -180,7 +180,7 @@ const handleWriteImpl = (ctx: DbHandlerContext, event: WriteEvent) =>
                   catch: (e) =>
                     e instanceof Error ? e : new Error(String(e)),
                 });
-                yield* ctx.rootCache.set(updated, [typedOp.path[0]]);
+                yield* ctx.rootCache.set(updated, typedOp.path.length === 0 ? undefined : [typedOp.path[0]]);
               }),
             ),
           ),

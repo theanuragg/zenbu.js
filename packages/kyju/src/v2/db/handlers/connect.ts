@@ -84,6 +84,14 @@ export const handleConnect = (
           if (version > lastRootVersion) removedKeys.push(key);
         }
 
+        // A key modified then deleted after lastRootVersion appears in both
+        // lists. Deduplicate so merge order doesn't matter — without this,
+        // swapping the change-then-remove sequence would re-add a deleted key.
+        const removedSet = new Set(removedKeys);
+        const dedupedChanged = changedKeys.filter((k) => !removedSet.has(k));
+        changedKeys.length = 0;
+        changedKeys.push(...dedupedChanged);
+
         const partialRoot: Record<string, KyjuJSON> = {};
         if (typeof root === "object" && root !== null && !Array.isArray(root)) {
           const rootObj = root as Record<string, KyjuJSON>;
