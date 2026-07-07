@@ -57,6 +57,7 @@ export const runPlugins = (
       root,
       collections: [],
       blobs: [],
+      changedKeys: [],
     });
 
     const client = createClient<SchemaShape>(replica);

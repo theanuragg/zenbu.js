@@ -24,6 +24,7 @@ export type CollectionResult<Item> = {
 type Replica = {
   getState: () => ClientState;
   subscribe: (cb: (state: ClientState) => void) => () => void;
+  subscribeKeyed: (keys: string[], cb: (state: ClientState) => void) => () => void;
   postMessage: (event: ClientEvent) => Promise<void>;
   onCollectionConcat: (collectionId: string, cb: (data: { collection: CollectionState; newItems: unknown[] }) => void) => void;
   offCollectionConcat: (collectionId: string, cb: (data: { collection: CollectionState; newItems: unknown[] }) => void) => void;
@@ -63,6 +64,21 @@ export function createKyjuReact<
 
   type Root = TRoot;
 
+  /**
+   * Extract the first top-level root key from a selector function's source
+   * text, e.g. `root => root.app.todos` → `"app"`. Falls back to `undefined`
+   * when the source can't be parsed, which triggers a full (non-keyed)
+   * subscription.
+   */
+  const extractTopLevelKey = (selector: Function): string | undefined => {
+    try {
+      const m = selector.toString().match(/\broot\.(\w+)/);
+      return m?.[1];
+    } catch {
+      return undefined;
+    }
+  };
+
   function useDb(): Root;
   function useDb<T>(
     selector: (root: Root) => T,
@@ -81,7 +97,15 @@ export function createKyjuReact<
     const cacheRef = useRef<{ output: T } | null>(null);
 
     const subscribe = useCallback(
-      (cb: () => void) => replica.subscribe(() => cb()),
+      (cb: () => void) => {
+        const sel = selectorRef.current;
+        if (sel) {
+          const key = extractTopLevelKey(sel);
+          const keys = key ? [key] : [];
+          return replica.subscribeKeyed(keys, () => cb());
+        }
+        return replica.subscribe(() => cb());
+      },
       [replica],
     );
 

@@ -373,4 +373,100 @@ describe("useDb nested array reactivity", () => {
     expect(result.current[0].status).toBe("streaming");
     expect(renderCount).toBeGreaterThan(afterInitial);
   });
+
+  describe("subscribeKeyed", () => {
+    it("calls callback when watched key changes", async () => {
+      const ctx = await setup();
+      cleanup = ctx.cleanup;
+      await delay(20);
+
+      const calls: string[] = [];
+      const unsub = ctx.replica.subscribeKeyed(["title"], (state) => {
+        if (state.kind === "connected") calls.push(state.root.title as string);
+      });
+
+      await act(async () => {
+        await ctx.client.title.set("changed");
+        await delay(20);
+      });
+
+      expect(calls).toContain("changed");
+      unsub();
+    });
+
+    it("does NOT call callback when unwatched key changes", async () => {
+      const ctx = await setup();
+      cleanup = ctx.cleanup;
+      await delay(20);
+
+      let callCount = 0;
+      const unsub = ctx.replica.subscribeKeyed(["title"], () => {
+        callCount++;
+      });
+
+      // Reset call count to ignore the initial replay
+      callCount = 0;
+
+      await act(async () => {
+        await ctx.replica.postMessage({
+          kind: "write",
+          op: { type: "root.set", path: ["unrelated"], value: "noise" },
+        });
+        await delay(20);
+      });
+
+      // Should NOT have been called — watched key ["title"] vs changed key ["unrelated"]
+      await delay(10);
+      expect(callCount).toBe(0);
+      unsub();
+    });
+
+    it("calls callback when any watched key changes among many", async () => {
+      const ctx = await setup();
+      cleanup = ctx.cleanup;
+      await delay(20);
+
+      const calls: string[] = [];
+      const unsub = ctx.replica.subscribeKeyed(
+        ["title", "data"],
+        (state) => {
+          if (state.kind === "connected")
+            calls.push(state.root.title as string);
+        },
+      );
+
+      // Reset initial replay
+      calls.length = 0;
+
+      await act(async () => {
+        await ctx.client.title.set("updated");
+        await delay(20);
+      });
+
+      expect(calls).toContain("updated");
+      unsub();
+    });
+
+    it("empty key list subscribes to all changes", async () => {
+      const ctx = await setup();
+      cleanup = ctx.cleanup;
+      await delay(20);
+
+      let callCount = 0;
+      const unsub = ctx.replica.subscribeKeyed([], () => {
+        callCount++;
+      });
+
+      // Reset initial replay
+      callCount = 0;
+
+      await act(async () => {
+        await ctx.client.title.set("changed");
+        await delay(20);
+      });
+
+      expect(callCount).toBeGreaterThanOrEqual(1);
+      unsub();
+    });
+  });
 });

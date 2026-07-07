@@ -244,6 +244,7 @@ export type ClientState =
       kind: "connected";
       sessionId: string;
       root: KyjuJSON;
+      changedKeys: string[];
       collections: CollectionState[];
       blobs: ClientBlob[];
     }

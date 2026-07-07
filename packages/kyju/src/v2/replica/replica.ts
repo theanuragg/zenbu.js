@@ -44,6 +44,28 @@ const concatToCollection = (
 };
 
 /**
+ * Extract the top-level key affected by a write op for selective
+ * subscription filtering. Root ops use `path[0]`; collection and blob
+ * ops use sentinel keys so subscribers that filter on specific root
+ * keys skip re-evaluation when only non-root data changed.
+ */
+const changedKeyForOp = (op: WriteOp): string | undefined => {
+  switch (op.type) {
+    case "root.set":
+    case "root.delete":
+      return op.path[0];
+    case "collection.create":
+    case "collection.concat":
+    case "collection.delete":
+      return "$collections";
+    case "blob.create":
+    case "blob.set":
+    case "blob.delete":
+      return "$blobs";
+  }
+};
+
+/**
  * Pure reducer: fold a single write op into a connected client state
  * snapshot. Used both for one-shot writes (`applyWrite`) and for batched
  * writes (`applyWriteBatch`), which fold N ops in a single `Ref.update`
@@ -55,11 +77,13 @@ const reduceWrite = (state: ConnectedState, op: WriteOp): ConnectedState => {
       return {
         ...state,
         root: setAtPath({ root: state.root, path: op.path, value: op.value }),
+        changedKeys: op.path[0] !== undefined ? [op.path[0]] : [],
       };
     case "root.delete":
       return {
         ...state,
         root: deleteAtPath({ root: state.root, path: op.path }),
+        changedKeys: op.path[0] !== undefined ? [op.path[0]] : [],
       };
     case "collection.create": {
       const collection: CollectionState = {
@@ -67,7 +91,7 @@ const reduceWrite = (state: ConnectedState, op: WriteOp): ConnectedState => {
         totalCount: op.data?.length ?? 0,
         items: op.data ?? [],
       };
-      return { ...state, collections: [...state.collections, collection] };
+      return { ...state, collections: [...state.collections, collection], changedKeys: [] };
     }
     case "collection.concat":
       return {
@@ -77,6 +101,7 @@ const reduceWrite = (state: ConnectedState, op: WriteOp): ConnectedState => {
             ? concatToCollection(col, op.data)
             : col,
         ),
+        changedKeys: [],
       };
     case "collection.delete":
       return {
@@ -84,6 +109,7 @@ const reduceWrite = (state: ConnectedState, op: WriteOp): ConnectedState => {
         collections: state.collections.filter(
           (col) => col.id !== op.collectionId,
         ),
+        changedKeys: [],
       };
     case "blob.create": {
       const blob: ClientBlob = {
@@ -93,7 +119,7 @@ const reduceWrite = (state: ConnectedState, op: WriteOp): ConnectedState => {
           : { kind: "cold" },
         fileSize: 0,
       };
-      return { ...state, blobs: [...state.blobs, blob] };
+      return { ...state, blobs: [...state.blobs, blob], changedKeys: [] };
     }
     case "blob.set":
       return {
@@ -108,11 +134,13 @@ const reduceWrite = (state: ConnectedState, op: WriteOp): ConnectedState => {
           }
           return blob;
         }),
+        changedKeys: [],
       };
     case "blob.delete":
       return {
         ...state,
         blobs: state.blobs.filter((blob) => blob.id !== op.blobId),
+        changedKeys: [],
       };
   }
   op satisfies never;
@@ -135,6 +163,10 @@ const applyWrite = ({
  * Apply a whole batch in a single `Ref.update`. Subscribers see exactly
  * one state transition for the batch, even though the wire-side replication
  * still ships one server event per op.
+ *
+ * `changedKeys` is the union of all keys touched by any op in the batch,
+ * so selective subscribers can skip evaluation when none of their watched
+ * keys appear in the batch.
  */
 const applyWriteBatch = ({
   stateRef,
@@ -145,7 +177,19 @@ const applyWriteBatch = ({
 }) =>
   applyState({
     ref: stateRef,
-    fn: (state) => ops.reduce(reduceWrite, state),
+    fn: (state) => {
+      // Collect union of all keys changed in this batch
+      const batchChangedKeys: string[] = [];
+      for (const op of ops) {
+        const k = changedKeyForOp(op);
+        if (k !== undefined && !batchChangedKeys.includes(k)) {
+          batchChangedKeys.push(k);
+        }
+      }
+      const next = ops.reduce(reduceWrite, state);
+      next.changedKeys = batchChangedKeys;
+      return next;
+    },
   });
 
 // Replicated writes (events arriving from the server / other replicas)
@@ -242,6 +286,7 @@ const createReplicaEffect = (
               root: ack.root,
               collections: [],
               blobs: [],
+              changedKeys: [],
             });
             return;
           }
@@ -518,6 +563,7 @@ const createReplicaEffect = (
                   root: connectAck.root,
                   collections: [],
                   blobs: [],
+                  changedKeys: [],
                 });
                 return;
               }
@@ -592,15 +638,30 @@ export const createReplica = (args: CreateReplicaArgs) => {
   // through here; a fiber-per-subscriber meant O(subscribers) scheduler
   // overhead per write plus async teardown that leaked under mount churn.
   const listeners = new Set<(state: ClientState) => void>();
+  type KeyedEntry = { keys: string[]; cb: (state: ClientState) => void };
+  const keyedListeners = new Set<KeyedEntry>();
   Effect.runFork(
     Stream.runForEach(stateRef.changes, (state) =>
-      // Snapshot the set so a listener that (un)subscribes mid-notify
+      // Snapshot the sets so a listener that (un)subscribes mid-notify
       // can't perturb the iteration, and isolate listener throws.
       Effect.sync(() => {
         for (const l of Array.from(listeners)) {
           try {
             l(state);
           } catch {}
+        }
+        if (state.kind === "connected") {
+          const changedKeys = state.changedKeys;
+          for (const ks of Array.from(keyedListeners)) {
+            if (
+              ks.keys.length === 0 ||
+              ks.keys.some((k) => changedKeys.includes(k))
+            ) {
+              try {
+                ks.cb(state);
+              } catch {}
+            }
+          }
         }
       }),
     ),
@@ -616,5 +677,17 @@ export const createReplica = (args: CreateReplicaArgs) => {
     };
   };
 
-  return { postMessage, postMessageEffect, getState, _forceState, subscribe, replicaId, onCollectionConcat, offCollectionConcat };
+  const subscribeKeyed = (
+    keys: string[],
+    cb: (state: ClientState) => void,
+  ): (() => void) => {
+    const entry: KeyedEntry = { keys, cb };
+    keyedListeners.add(entry);
+    cb(Effect.runSync(Ref.get(stateRef)));
+    return () => {
+      keyedListeners.delete(entry);
+    };
+  };
+
+  return { postMessage, postMessageEffect, getState, _forceState, subscribe, subscribeKeyed, replicaId, onCollectionConcat, offCollectionConcat };
 };
