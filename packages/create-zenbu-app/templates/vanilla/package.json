@@ -4,9 +4,9 @@
   "type": "module",
   "main": "node_modules/@zenbujs/core/dist/setup-gate.mjs",
   "scripts": {
-    "dev": "zen dev",
-    "build:source": "zen build:source",
-    "build:electron": "zen build:electron",
+    "dev": "node init && zen dev",
+    "build:source": "node init && zen build:source",
+    "build:electron": "node init && zen build:electron",
     "publish:source": "zen publish:source",
     "link": "zen link",
     "db:generate": "zen db generate"

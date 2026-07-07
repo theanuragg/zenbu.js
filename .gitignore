@@ -39,7 +39,6 @@ pnpm-debug.log*
 lerna-debug.log*
 
 # Editor
-.vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
 !.vscode/tasks.json
@@ -68,8 +67,6 @@ Desktop.ini
 $RECYCLE.BIN/
 
 # Env files
-.env
-.env.*
 !.env.example
 !.env.template
 !.env.sample
@@ -162,3 +159,4 @@ packages/init/.zenbu/db/
 
 # Perf experiment output
 **/perf-experiment-out/
+config.bat
