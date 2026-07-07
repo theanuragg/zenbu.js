@@ -147,7 +147,16 @@ export type DbUpdateMessage =
   | BlobMetadataUpdate
   | ReconnectUpdate;
 
-export type ConnectAck = Ack<{ root: KyjuJSON }, "VersionMismatchError">;
+export type ConnectAck = Ack<
+  {
+    root: KyjuJSON | null;
+    rootVersion: number;
+    changedKeys?: string[];
+    removedKeys?: string[];
+    isPartial?: boolean;
+  },
+  "VersionMismatchError"
+>;
 export type CollectionFetchRangeAck = Ack<
   { items: KyjuJSON[]; totalCount: number },
   "NotFoundError"
@@ -159,7 +168,7 @@ export type SubscribeAck = Ack<
 export type BlobReadAck = Ack<{ data: Uint8Array }, "NotFoundError">;
 
 export type ClientEvent =
-  | { kind: "connect"; version: number }
+  | { kind: "connect"; version: number; lastRootVersion?: number }
   | { kind: "disconnect" }
   | { kind: "subscribe-collection"; collectionId: string }
   | { kind: "unsubscribe-collection"; collectionId: string }
@@ -185,6 +194,7 @@ export type ServerEvent =
         version: number;
         requestId: string;
         replicaId: string;
+        lastRootVersion?: number;
       };
     }
   | {
@@ -244,6 +254,7 @@ export type ClientState =
       kind: "connected";
       sessionId: string;
       root: KyjuJSON;
+      rootVersion: number;
       collections: CollectionState[];
       blobs: ClientBlob[];
     }

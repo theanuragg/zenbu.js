@@ -55,6 +55,7 @@ export const runPlugins = (
       kind: "connected" as const,
       sessionId,
       root,
+      rootVersion: 0,
       collections: [],
       blobs: [],
     });

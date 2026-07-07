@@ -158,6 +158,65 @@ describe("replica", () => {
     expect(stateA.collections).toEqual([]);
     expect(stateB.collections).toEqual([]);
   });
+
+  it("reconnect delta sync preserves data written before reconnect", async () => {
+    const ctx = await setupMultiClient(1);
+    cleanup = ctx.cleanup;
+
+    await ctx.clients[0].title.set("before reconnect");
+    await ctx.clients[0].update((root) => {
+      (root as any).extra = "also written before reconnect";
+    });
+
+    const oldSessionId = getConnectedState(ctx.replicas[0]).sessionId;
+
+    // Reconnect triggers delta sync: server has rootVersion > lastRootVersion
+    // so it sends only changed keys as a partial root.
+    await ctx.db.reconnectClients();
+
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      const s = getState(ctx.replicas[0]);
+      if (s.kind === "connected" && s.sessionId !== oldSessionId) break;
+      await delay(10);
+    }
+
+    const state = getConnectedState(ctx.replicas[0]);
+    expect(state.sessionId).not.toBe(oldSessionId);
+    expect((state.root as any).title).toBe("before reconnect");
+    expect((state.root as any).extra).toBe("also written before reconnect");
+  });
+
+  it("reconnect delta sync handles key deletions", async () => {
+    const ctx = await setupMultiClient(1);
+    cleanup = ctx.cleanup;
+
+    await ctx.clients[0].title.set("will survive");
+    await ctx.clients[0].update((root) => {
+      (root as any).transient = "will be deleted";
+    });
+
+    // Delete the key so the server records it in deletedKeyVersions.
+    await ctx.clients[0].update((root) => {
+      delete (root as any).transient;
+    });
+
+    const oldSessionId = getConnectedState(ctx.replicas[0]).sessionId;
+
+    await ctx.db.reconnectClients();
+
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      const s = getState(ctx.replicas[0]);
+      if (s.kind === "connected" && s.sessionId !== oldSessionId) break;
+      await delay(10);
+    }
+
+    const state = getConnectedState(ctx.replicas[0]);
+    expect(state.sessionId).not.toBe(oldSessionId);
+    expect((state.root as any).title).toBe("will survive");
+    expect((state.root as any).transient).toBeUndefined();
+  });
 });
 
 describe("collection subscription", () => {

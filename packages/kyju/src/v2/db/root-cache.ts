@@ -47,8 +47,21 @@ import { traceKyju } from "../trace";
 export type RootCache = {
   /** Current in-memory root. Cheap; reflects all completed writes. */
   read: () => Effect.Effect<KyjuJSON>;
-  /** Replace the root in memory and schedule a coalesced disk flush. */
-  set: (root: KyjuJSON) => Effect.Effect<void>;
+  /** Current root plus version metadata for incremental sync. */
+  readRootInfo: () => Effect.Effect<{
+    root: KyjuJSON;
+    rootVersion: number;
+    keyVersions: Record<string, number>;
+    deletedKeyVersions: Record<string, number>;
+  }>;
+  /**
+   * Replace the root in memory and schedule a coalesced disk flush.
+   * `changedKeys` names the top-level keys that were actually modified
+   * (path[0] from the write op). When omitted the cache diffs the full
+   * root to detect changes — prefer passing explicit keys for accuracy
+   * with key deletion tracking.
+   */
+  set: (root: KyjuJSON, changedKeys?: string[]) => Effect.Effect<void>;
   /** Block until disk reflects the current in-memory root. Idempotent. */
   flush: () => Effect.Effect<void>;
 };
@@ -61,6 +74,12 @@ export const makeRootCache = (
   Effect.gen(function* () {
     const initial = yield* readJsonFile({ fs, path: paths.root({ config }) });
     let cached: KyjuJSON = initial;
+
+    // Version counter for incremental reconnect sync. Every `set()`
+    // increments the version and records which top-level keys changed.
+    let rootVersion = 0;
+    const keyVersions = new Map<string, number>();
+    const deletedKeyVersions = new Map<string, number>();
 
     // Producer/consumer state for the coalescing flusher.
     //   • `pending`         — cache has unflushed changes
@@ -110,15 +129,94 @@ export const makeRootCache = (
       })();
     };
 
+    const computeChangedKeys = (next: KyjuJSON): string[] => {
+      const changed: string[] = [];
+      if (
+        typeof cached !== "object" || cached === null ||
+        typeof next !== "object" || next === null ||
+        Array.isArray(cached) !== Array.isArray(next)
+      ) {
+        // Type change — include every key from both old and new so the
+        // delta sync doesn't silently drop an entire state tree.
+        const all = new Set<string>();
+        if (typeof cached === "object" && cached !== null && !Array.isArray(cached)) {
+          for (const k of Object.keys(cached as Record<string, KyjuJSON>)) all.add(k);
+        }
+        if (typeof next === "object" && next !== null && !Array.isArray(next)) {
+          for (const k of Object.keys(next as Record<string, KyjuJSON>)) all.add(k);
+        }
+        return Array.from(all);
+      }
+      const oldObj = cached as Record<string, KyjuJSON>;
+      const newObj = next as Record<string, KyjuJSON>;
+      const allKeys = new Set([...Object.keys(oldObj), ...Object.keys(newObj)]);
+      for (const key of allKeys) {
+        if (key in oldObj !== key in newObj || oldObj[key] !== newObj[key]) {
+          changed.push(key);
+        }
+      }
+      return changed;
+    };
+
     return {
       read: () => Effect.sync(() => cached),
-      set: (root: KyjuJSON) =>
+      readRootInfo: () =>
+        Effect.sync(() => ({
+          root: cached,
+          rootVersion,
+          keyVersions: Object.fromEntries(keyVersions),
+          deletedKeyVersions: Object.fromEntries(deletedKeyVersions),
+        })),
+      set: (root: KyjuJSON, changedKeys?: string[]) =>
         Effect.sync(() => {
+          const keys = changedKeys ?? computeChangedKeys(root);
+
+          if (changedKeys === undefined) {
+            // Full-root diff: detect both additions/modifications and deletions.
+            const resolvedDeleted: string[] = [];
+            const resolvedChanged: string[] = [];
+            for (const key of keys) {
+              if (
+                typeof cached === "object" && cached !== null &&
+                !Array.isArray(cached) &&
+                !(key in (cached as Record<string, KyjuJSON>))
+              ) {
+                resolvedChanged.push(key);
+              } else if (
+                typeof root === "object" && root !== null &&
+                !Array.isArray(root) &&
+                !(key in (root as Record<string, KyjuJSON>))
+              ) {
+                resolvedDeleted.push(key);
+              } else {
+                resolvedChanged.push(key);
+              }
+            }
+            rootVersion++;
+            for (const key of resolvedChanged) keyVersions.set(key, rootVersion);
+            for (const key of resolvedDeleted) deletedKeyVersions.set(key, rootVersion);
+          } else {
+            rootVersion++;
+            const resolvedDeleted: string[] = [];
+            const resolvedChanged: string[] = [];
+            for (const key of keys) {
+              if (
+                typeof root === "object" && root !== null &&
+                !Array.isArray(root) &&
+                !(key in (root as Record<string, KyjuJSON>))
+              ) {
+                resolvedDeleted.push(key);
+              } else {
+                resolvedChanged.push(key);
+              }
+            }
+            for (const key of resolvedChanged) keyVersions.set(key, rootVersion);
+            for (const key of resolvedDeleted) deletedKeyVersions.set(key, rootVersion);
+          }
+
           cached = root;
           pending = true;
           if (runner || scheduledTimer) return;
-          // setImmediate (not microtask) so multiple writes in the same tick
-          // observe the same scheduled timer and coalesce into one flush.
           scheduledTimer = setImmediate(startRunner);
         }),
       flush: () =>

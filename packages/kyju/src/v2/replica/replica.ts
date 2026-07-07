@@ -230,16 +230,54 @@ const createReplicaEffect = (
                   version: event.version,
                   requestId,
                   replicaId,
+                  lastRootVersion: event.lastRootVersion,
                 },
               },
               requestId,
             );
             if (ack.error) return yield* Effect.fail(ack.error);
 
+            // Merge a partial/delta root into the current in-memory state.
+            // Three cases:
+            //   1. `root === null`  — no changes, keep existing root
+            //   2. `isPartial`      — shallow-merge changed keys + remove deleted keys
+            //   3. full root         — replace entirely (first-time connect / compat)
+            const prevRoot = yield* Ref.get(stateRef).pipe(
+              Effect.map((s) =>
+                s.kind === "connected" ? s.root : null,
+              ),
+              Effect.catchAll(() => Effect.succeed(null as KyjuJSON | null)),
+            );
+
+            let mergedRoot: KyjuJSON;
+            if (ack.root === null) {
+              mergedRoot = prevRoot ?? ({} as KyjuJSON);
+            } else if (ack.isPartial && prevRoot !== null) {
+              const base =
+                typeof prevRoot === "object" && prevRoot !== null && !Array.isArray(prevRoot)
+                  ? { ...(prevRoot as Record<string, KyjuJSON>) }
+                  : {};
+              if (typeof ack.root === "object" && ack.root !== null && !Array.isArray(ack.root)) {
+                const delta = ack.root as Record<string, KyjuJSON>;
+                for (const key of Object.keys(delta)) {
+                  base[key] = delta[key];
+                }
+              }
+              if (ack.removedKeys) {
+                for (const key of ack.removedKeys) {
+                  delete base[key];
+                }
+              }
+              mergedRoot = base;
+            } else {
+              mergedRoot = ack.root;
+            }
+
             yield* Ref.set(stateRef, {
               kind: "connected" as const,
               sessionId: ack.sessionId,
-              root: ack.root,
+              root: mergedRoot,
+              rootVersion: ack.rootVersion ?? 0,
               collections: [],
               blobs: [],
             });
@@ -478,6 +516,7 @@ const createReplicaEffect = (
 
               case "reconnect": {
                 const reconState = yield* requireConnected({ ref: stateRef });
+                const lastRootVersion = reconState.rootVersion;
                 const disconnectId = nanoid();
                 const disconnectAck = yield* sendToServer<Ack<any, any>>(
                   {
@@ -505,6 +544,7 @@ const createReplicaEffect = (
                       version: VERSION,
                       requestId: connectId,
                       replicaId,
+                      lastRootVersion,
                     },
                   },
                   connectId,
@@ -512,10 +552,36 @@ const createReplicaEffect = (
                 if (connectAck.error)
                   return yield* Effect.fail(connectAck.error);
 
+                const prevRoot = reconState.root;
+                let mergedRoot: KyjuJSON;
+                if (connectAck.root === null) {
+                  mergedRoot = prevRoot;
+                } else if (connectAck.isPartial) {
+                  const base =
+                    typeof prevRoot === "object" && prevRoot !== null && !Array.isArray(prevRoot)
+                      ? { ...(prevRoot as Record<string, KyjuJSON>) }
+                      : {};
+                  if (typeof connectAck.root === "object" && connectAck.root !== null && !Array.isArray(connectAck.root)) {
+                    const delta = connectAck.root as Record<string, KyjuJSON>;
+                    for (const key of Object.keys(delta)) {
+                      base[key] = delta[key];
+                    }
+                  }
+                  if (connectAck.removedKeys) {
+                    for (const key of connectAck.removedKeys) {
+                      delete base[key];
+                    }
+                  }
+                  mergedRoot = base;
+                } else {
+                  mergedRoot = connectAck.root;
+                }
+
                 yield* Ref.set(stateRef, {
                   kind: "connected" as const,
                   sessionId: connectAck.sessionId,
-                  root: connectAck.root,
+                  root: mergedRoot,
+                  rootVersion: connectAck.rootVersion ?? 0,
                   collections: [],
                   blobs: [],
                 });
